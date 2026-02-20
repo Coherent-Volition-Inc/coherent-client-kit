@@ -1,0 +1,24 @@
+{
+  "name": "@coherent/client-kit",
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "yarn@4.0.0",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./mithril": {
+      "import": "./dist/mithril.mjs",
+      "require": "./dist/mithril.cjs"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "vitest run",
+    "prepack": "yarn build"
+  }
+}
