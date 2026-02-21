@@ -1,0 +1,136 @@
+# .github/workflows/auto-release-tags.yml
+name: Auto release tags (semver + latest)
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-release-tags-${{ github.repository }}-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  tag-and-bump:
+    # Prevent loops from the bot's own version-bump commit
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch tags
+        run: git fetch --tags --force
+
+      - name: Read package version
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).version)")"
+
+          # Require plain semver (X.Y.Z) for auto patch bump logic
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: package.json version must be plain semver X.Y.Z (got: $VERSION)"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Auto-bump patch if tag already exists
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.pkg.outputs.version }}"
+          VTAG="v${VERSION}"
+
+          tag_exists() {
+            git rev-parse -q --verify "refs/tags/$1" >/dev/null
+          }
+
+          if tag_exists "$VTAG"; then
+            echo "Tag $VTAG already exists. Auto-bumping patch version..."
+
+            NEW_VERSION="$(node -e '
+              const fs = require("fs");
+              const p = JSON.parse(fs.readFileSync("package.json","utf8"));
+              const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(p.version);
+              if (!m) { console.error("Invalid semver:", p.version); process.exit(1); }
+              const next = `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
+              p.version = next;
+              fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n");
+              console.log(next);
+            ')"
+
+            git add package.json
+            git commit -m "chore: release v${NEW_VERSION} [skip ci]"
+            git push origin HEAD:master
+
+            VERSION="$NEW_VERSION"
+            VTAG="v${VERSION}"
+          else
+            echo "Tag $VTAG does not exist. Using package.json version as-is."
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "vtag=$VTAG" >> "$GITHUB_OUTPUT"
+
+      - name: Refresh tags after possible bump commit
+        run: git fetch --tags --force
+
+      - name: Create semver tag on current HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VTAG="${{ steps.release.outputs.vtag }}"
+          HEAD_SHA="$(git rev-parse HEAD)"
+
+          if git rev-parse -q --verify "refs/tags/$VTAG" >/dev/null; then
+            TAG_SHA="$(git rev-list -n 1 "$VTAG")"
+            if [[ "$TAG_SHA" != "$HEAD_SHA" ]]; then
+              echo "ERROR: $VTAG already exists on $TAG_SHA, but HEAD is $HEAD_SHA"
+              exit 1
+            fi
+            echo "$VTAG already points at HEAD; no tag creation needed."
+          else
+            git tag -a "$VTAG" -m "Release $VTAG"
+            git push origin "refs/tags/$VTAG"
+          fi
+
+      - name: Move latest alias tag to current HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHORT="$(git rev-parse --short HEAD)"
+          git tag -fa latest -m "Latest release on master (${SHORT})" HEAD
+          git push origin "refs/tags/latest" --force
+
+      - name: Print jsDelivr import URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY}"
+          VTAG="${{ steps.release.outputs.vtag }}"
+
+          echo "Pinned:"
+          echo "https://cdn.jsdelivr.net/gh/${REPO}@${VTAG}/src/core.js"
+          echo
+          echo "Latest alias (mutable, cache may lag):"
+          echo "https://cdn.jsdelivr.net/gh/${REPO}@latest/src/core.js"

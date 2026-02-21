@@ -1,5 +1,5 @@
 // src/auth.js
-import { AUTH_API } from '../constants.js';
+import { handleOAuthReturnIfPresent, startOAuthFlow } from './oauth.js';
 
 const m = window.m;
 
@@ -21,57 +21,6 @@ function flattenRouteTree(tree, out = [], parent = null) {
     if (n.children?.length) flattenRouteTree(n.children, out, n);
   }
   return out;
-}
-
-// ------------------------------------------------------------------
-// Small helpers (cookie-friendly POST + OAuth query parsing)
-// ------------------------------------------------------------------
-
-function _qsFromLocation() {
-  // Supports both path-based and hash-based routing.
-  if (window.location.search && window.location.search.includes('oauth=')) {
-    return new URLSearchParams(window.location.search);
-  }
-  const h = window.location.hash || '';
-  const idx = h.indexOf('?');
-  if (idx >= 0) return new URLSearchParams(h.slice(idx + 1));
-  return new URLSearchParams(window.location.search || '');
-}
-
-function _stripOauthParamsFromUrl() {
-  const params = _qsFromLocation();
-  if (!params.has('oauth')) return;
-
-  const kill = ['oauth', 'login', 'linked', 'authed', 'error', 'provider', 'message'];
-  kill.forEach(k => params.delete(k));
-
-  // Query in location.search
-  if (window.location.search && window.location.search.includes('oauth=')) {
-    const url = new URL(window.location.href);
-    kill.forEach(k => url.searchParams.delete(k));
-    window.history.replaceState({}, '', url.toString());
-    return;
-  }
-
-  // Query in hash
-  const h = window.location.hash || '';
-  const idx = h.indexOf('?');
-  if (idx >= 0) {
-    const base = h.slice(0, idx);
-    const rest = params.toString();
-    window.history.replaceState(
-      {},
-      '',
-      window.location.pathname + window.location.search + (rest ? `${base}?${rest}` : base)
-    );
-  }
-}
-
-function _currentReturnUrl() {
-  // Return current SPA URL (including hash route), without transient query params.
-  const base = window.location.origin + window.location.pathname;
-  const hash = window.location.hash ? window.location.hash.split('?')[0] : '';
-  return base + hash;
 }
 
 async function _postJson(url, body, { credentials } = {}) {
@@ -108,6 +57,39 @@ export const Auth = {
   // route tree is optional; used for landing heuristics
   _routeTree: null,
 
+  // runtime config (set by host app)
+  _config: {
+    authApi: null,
+    homePath: '/home', // default landing path for OAuth completion
+  },
+
+  configure(opts = {}) {
+    const {
+      authApi,
+      homePath,
+    } = opts;
+
+    if (authApi != null) {
+      const s = String(authApi).trim().replace(/\/+$/, '');
+      this._config.authApi = s || null;
+    }
+
+    if (homePath != null) {
+      const hp = String(homePath).trim();
+      if (hp) this._config.homePath = hp;
+    }
+
+    return this;
+  },
+
+  _requireAuthApi() {
+    const v = this._config?.authApi;
+    if (!v) {
+      throw new Error('Auth is not configured. Call Auth.configure({ authApi }) before use.');
+    }
+    return v;
+  },
+
   setRouteTree(tree) {
     this._routeTree = tree || null;
   },
@@ -121,7 +103,7 @@ export const Auth = {
 
     for (const p of this.permissions) {
       const group = Array.isArray(p) ? p[0] : p?.user_group;
-      const ab    = Array.isArray(p) ? p[1] : p?.group_ability;
+      const ab = Array.isArray(p) ? p[1] : p?.group_ability;
       if (!group || !ab) continue;
 
       const ability_ok = (ab === ability) || (ab === "*");
@@ -240,9 +222,11 @@ export const Auth = {
 
     this._refreshPromise = (async () => {
       try {
+        const authApi = this._requireAuthApi();
+
         // Cookie-based refresh: no body token, include credentials
         const response = await _postJson(
-          `${AUTH_API}/api/token`,
+          `${authApi}/api/token`,
           null,
           { credentials: 'include' }
         );
@@ -266,8 +250,10 @@ export const Auth = {
 
   // Optional helper if you want this module to own password login too
   async loginWithPassword(username, password) {
+    const authApi = this._requireAuthApi();
+
     const response = await _postJson(
-      `${AUTH_API}/api/password/authenticate`,
+      `${authApi}/api/password/authenticate`,
       { username, password },
       { credentials: 'include' } // IMPORTANT for refresh cookie
     );
@@ -281,55 +267,37 @@ export const Auth = {
   },
 
   // ------------------------------------------------------------------
-  // Optional GitHub OAuth helpers (same pattern as main app)
+  // OAuth helpers (delegated to oauth.js)
   // ------------------------------------------------------------------
 
-  _oauthStartPath(provider) {
-    return `/api/oauth/${provider}/start`;
-  },
-
   startGithubOAuthLogin() {
-    const nextUrl = _currentReturnUrl();
-    const url = `${AUTH_API}${this._oauthStartPath('github')}?intent=login&next_url=${encodeURIComponent(nextUrl)}`;
-    window.location.assign(url);
+    return startOAuthFlow({
+      authApi: this._requireAuthApi(),
+      provider: 'github',
+      intent: 'login',
+      win: window,
+    });
   },
 
   startGithubOAuthLink() {
-    const nextUrl = _currentReturnUrl();
-    const url = `${AUTH_API}${this._oauthStartPath('github')}?intent=link&next_url=${encodeURIComponent(nextUrl)}`;
-    window.location.assign(url);
+    return startOAuthFlow({
+      authApi: this._requireAuthApi(),
+      provider: 'github',
+      intent: 'link',
+      win: window,
+    });
   },
 
   async _handleOAuthReturnIfPresent() {
-    const q = _qsFromLocation();
-    const provider = (q.get('oauth') || '').toLowerCase();
-    if (!provider) return;
-
-    const login = q.get('login') === '1' || q.get('authed') === '1';
-    const linked = q.get('linked') === '1';
-
-    if (login) {
-      try {
-        await this.refreshJwt();
-        const dest = this.getPreferredLandingRoute('/home');
-        _stripOauthParamsFromUrl();
-
-        if (m?.route?.set) m.route.set(dest);
-        return;
-      } catch (e) {
-        console.error('OAuth login completion failed:', e);
-        _stripOauthParamsFromUrl();
-        return;
-      }
-    }
-
-    if (linked) {
-      try { await this.refreshJwt(); } catch {}
-      _stripOauthParamsFromUrl();
-      return;
-    }
-
-    _stripOauthParamsFromUrl();
+    return handleOAuthReturnIfPresent({
+      auth: this,
+      homePath: this._config.homePath || '/home',
+      navigate: (path) => {
+        if (m?.route?.set) m.route.set(path);
+      },
+      logger: console,
+      win: window,
+    });
   },
 
   init() {
