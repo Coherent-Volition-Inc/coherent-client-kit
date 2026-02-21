@@ -40,8 +40,8 @@ Add an **import map** to your `index.html` and point `"CVKit"` at a tagged relea
 <script type="importmap">
 {
   "imports": {
-    "CVKit": "https://cdn.jsdelivr.net/gh/coherentvolition/coherent-client-kit@v0.1.0/src/core.js",
-    "CVKit/": "https://cdn.jsdelivr.net/gh/coherentvolition/coherent-client-kit@v0.1.0/src/"
+    "CVKit": "https://cdn.jsdelivr.net/gh/Coherent-Volition-Inc/coherent-client-kit@latest/src/core.js",
+    "CVKit/": "https://cdn.jsdelivr.net/gh/Coherent-Volition-Inc/coherent-client-kit@latest/src/"
   }
 }
 </script>
@@ -55,7 +55,7 @@ Then load your app as a module:
 
 ### `@latest` vs pinned versions
 
-* `@v0.1.0` → stable, recommended for production
+* `@v0.0.2` → stable, recommended for production
 * `@latest` → convenient, mutable (CDN cache may lag after updates)
 
 ---
@@ -78,8 +78,8 @@ Then load your app as a module:
     <script type="importmap">
     {
       "imports": {
-        "CVKit": "https://cdn.jsdelivr.net/gh/coherentvolition/coherent-client-kit@v0.1.0/src/core.js",
-        "CVKit/": "https://cdn.jsdelivr.net/gh/coherentvolition/coherent-client-kit@v0.1.0/src/"
+        "CVKit": "https://cdn.jsdelivr.net/gh/Coherent-Volition-Inc/coherent-client-kit@latest/src/core.js",
+        "CVKit/": "https://cdn.jsdelivr.net/gh/Coherent-Volition-Inc/coherent-client-kit@latest/src/"
       }
     }
     </script>
@@ -325,9 +325,8 @@ CVKit includes helpers for protected routes and route-tree compilation.
 ### Example route tree
 
 ```js
-import m from "mithril"; // or rely on window.m
 import { Auth, compileRouteMap, LandingRoute } from "CVKit";
-import LoginComponent from "./login.js";
+const m = window.m;
 
 const Home = { view: () => m("div", "Home") };
 const Admin = { view: () => m("div", "Admin") };
@@ -343,7 +342,9 @@ const routeTree = [
 Auth.setRouteTree(routeTree);
 
 m.route(document.getElementById("app"), "/", compileRouteMap(routeTree, {
-  loginComponent: LoginComponent,
+  loginComponent: {
+    view: () => m("div", "Login")
+  },
 }));
 ```
 
@@ -418,10 +419,7 @@ Typical release flow:
 
 1. Bump `package.json` version
 2. Merge to `master`
-3. GitHub Action tags:
-
-   * `vX.Y.Z`
-   * `latest` (mutable alias)
+3. Tag `vX.Y.Z` (and optionally move `latest`)
 4. Consumers import from jsDelivr
 
 Example pinned import:
@@ -430,7 +428,7 @@ Example pinned import:
 <script type="importmap">
 {
   "imports": {
-    "CVKit": "https://cdn.jsdelivr.net/gh/coherentvolition/coherent-client-kit@v0.1.0/src/core.js"
+    "CVKit": "https://cdn.jsdelivr.net/gh/Coherent-Volition-Inc/coherent-client-kit@v0.0.2/src/core.js"
   }
 }
 </script>
@@ -440,6 +438,6 @@ Example pinned import:
 
 ## Notes
 
-* This library is **browser-only**.
-* It is intentionally **not** published to npm.
-* It is designed for Coherent front-ends that already use CDN-loaded browser libraries (Mithril, FullCalendar, etc.).
+* This library is **browser-only**
+* It is intentionally **not** published to npm
+* It is designed for Coherent front-ends that already use CDN-loaded browser libraries (Mithril, FullCalendar, etc.)
