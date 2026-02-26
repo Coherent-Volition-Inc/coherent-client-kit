@@ -15,10 +15,22 @@ export function decodeJwt(token) {
   return JSON.parse(jsonPayload);
 }
 
-function flattenRouteTree(tree, out = [], parent = null) {
+function flattenRouteTree(tree, out = [], inherited = {}) {
   for (const n of (tree || [])) {
-    out.push(n);
-    if (n.children?.length) flattenRouteTree(n.children, out, n);
+    const merged = {
+      ...n,
+      requires: (n.requires !== undefined) ? n.requires : (inherited.requires ?? null),
+      requiredGroup: (n.requiredGroup !== undefined) ? n.requiredGroup : (inherited.requiredGroup ?? null),
+    };
+
+    out.push(merged);
+
+    if (n.children?.length) {
+      flattenRouteTree(n.children, out, {
+        requires: merged.requires,
+        requiredGroup: merged.requiredGroup,
+      });
+    }
   }
   return out;
 }
@@ -269,24 +281,18 @@ export const Auth = {
   // ------------------------------------------------------------------
   // OAuth helpers (delegated to oauth.js)
   // ------------------------------------------------------------------
+  _oauthProviders: ['github', 'google'],
 
-  startGithubOAuthLogin() {
+  _startOAuth(provider, intent, { nextUrl, win } = {}) {
     return startOAuthFlow({
       authApi: this._requireAuthApi(),
-      provider: 'github',
-      intent: 'login',
-      win: window,
+      provider,
+      intent,
+      nextUrl,
+      win: win || window,
     });
   },
-
-  startGithubOAuthLink() {
-    return startOAuthFlow({
-      authApi: this._requireAuthApi(),
-      provider: 'github',
-      intent: 'link',
-      win: window,
-    });
-  },
+  oauth: null,
 
   async _handleOAuthReturnIfPresent() {
     return handleOAuthReturnIfPresent({
@@ -313,3 +319,18 @@ export const Auth = {
     this._handleOAuthReturnIfPresent();
   },
 };
+
+(function attachOAuthHelpers() {
+  const providers = Array.isArray(Auth._oauthProviders) ? Auth._oauthProviders : [];
+  Auth.oauth           = Auth.oauth           || {};
+
+  for (const p of providers) {
+    const provider = String(p || '').trim().toLowerCase();
+    if (!provider) continue;
+
+    Auth.oauth[provider] = Object.freeze({
+      startLogin(nextUrl) { return Auth._startOAuth(provider, 'login', { nextUrl }); },
+      startLink(nextUrl)  { return Auth._startOAuth(provider, 'link',  { nextUrl }); },
+    });
+  }
+})();
