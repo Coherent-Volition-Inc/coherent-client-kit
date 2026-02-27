@@ -288,7 +288,7 @@ export const Auth = {
       authApi: this._requireAuthApi(),
       provider,
       intent,
-      nextUrl,
+      ...(nextUrl !== undefined && { nextUrl }),  // ← omitted entirely if not supplied
       win: win || window,
     });
   },
