@@ -1,24 +1,119 @@
-// src/protected-route.js
+// src/router.js
+import { ProtectedRouteFactory } from './protected-route.js';
 import { Auth } from './auth.js';
+
 const m = window.m;
 
-const DefaultDenied = {
-  view: () => m('div.p-4.text-red-600', 'Access denied')
-};
+export function RedirectTo(path) {
+  return {
+    oncreate: () => m.route.set(path),
+    view: () => null
+  };
+}
 
-export function ProtectedRouteFactory(LoginComponent, DeniedComponent = DefaultDenied) {
+function joinPath(parent, child) {
+  const p = String(parent || '').replace(/\/+$/, '');
+  const c = String(child || '').replace(/^\/+/, '');
+  if (!p) return '/' + c;
+  if (!c) return p || '/';
+  return p + '/' + c;
+}
+
+function normalizeNode(node, parentMeta = {}, parentPath = '') {
+  const rawPath = node.path || '';
+  const absPath = rawPath.startsWith('/') ? rawPath : joinPath(parentPath, rawPath);
+
+  // child inherits parent protection + requires unless overridden
+  const meta = {
+    public: node.public ?? parentMeta.public ?? false,
+    requires: node.requires ?? parentMeta.requires ?? null,
+    requiredGroup: node.requiredGroup ?? parentMeta.requiredGroup ?? null,
+    utility: node.utility ?? false,
+  };
+
+  return { ...node, path: absPath, ...meta };
+}
+
+function wrapIfProtected(route, LoginComponent) {
+  if (route.public) return route.component;
+
+  // redirectTo is allowed instead of component
+  const comp = route.component || (route.redirectTo ? RedirectTo(route.redirectTo) : null);
+  if (!comp) throw new Error(`Route ${route.path} missing component or redirectTo`);
+
+  // If requires is defined on route, pass it through attrs.
+  const ProtectedRoute = ProtectedRouteFactory(LoginComponent);
+
   return {
     view(vnode) {
-      if (!Auth.isAuthenticated) return m(LoginComponent);
+      return m(ProtectedRoute, {
+        component: comp,
+        requires: route.requires,
+        requiredGroup: route.requiredGroup,
+        ...vnode.attrs
+      });
+    }
+  };
+}
 
-      const comp = vnode.attrs.component;
-      const requiredAbility = vnode.attrs.requires ?? comp?.requires;
-      const requiredGroup   = vnode.attrs.requiredGroup ?? comp?.requiredGroup;
+/**
+ * Compile a tree into a Mithril route map.
+ *
+ * Options:
+ *  - loginComponent: required (what to show when not authed)
+ */
+export function compileRouteMap(routeTree, { loginComponent } = {}) {
+  if (!loginComponent) throw new Error("compileRouteMap: loginComponent is required");
 
-      if (requiredAbility && !Auth.hasPermission(requiredAbility, requiredGroup)) {
-        return m(DeniedComponent);
+  const map = {};
+
+  function walk(nodes, parentMeta = {}, parentPath = '') {
+    for (const n of (nodes || [])) {
+      const r = normalizeNode(n, parentMeta, parentPath);
+
+      // If node has component or redirectTo, it becomes a routable leaf
+      const isLeaf = !!r.component || !!r.redirectTo;
+      if (isLeaf) {
+        map[r.path] = wrapIfProtected(r, loginComponent);
       }
-      return m(comp, vnode.attrs);
+
+      if (r.children?.length) walk(r.children, r, r.path);
+    }
+  }
+
+  walk(routeTree, {}, '');
+  return map;
+}
+
+/**
+ * Smart landing component:
+ * - if authed: go to preferred landing route
+ * - else: show login
+ *
+ * Awaits Auth._initPromise so that an OAuth return on the root path
+ * is handled before the landing decision is made.
+ */
+export function LandingRoute(homePath = '/home') {
+  return {
+    oninit(vnode) {
+      vnode.state._authReady = false;
+      const p = Auth._initPromise ?? Promise.resolve();
+      p.then(() => {
+        vnode.state._authReady = true;
+        if (Auth.isAuthenticated) {
+          const dest = Auth.getPreferredLandingRoute(homePath);
+          if (dest && dest !== '/') m.route.set(dest);
+        }
+        // If not authenticated, fall through to view() which renders null
+        // (the login component is shown by the route guard on the target route,
+        // or the host app's root handler)
+        m.redraw();
+      });
+    },
+    view(vnode) {
+      // Render nothing while waiting; after resolution either we've navigated
+      // away (authed) or we stay here and the host decides what to show.
+      return null;
     }
   };
 }

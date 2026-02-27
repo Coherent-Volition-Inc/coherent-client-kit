@@ -69,6 +69,10 @@ export const Auth = {
   // route tree is optional; used for landing heuristics
   _routeTree: null,
 
+  // Resolves when init() has finished the OAuth-return check.
+  // Guards and landing routes await this before making auth decisions.
+  _initPromise: null,
+
   // runtime config (set by host app)
   _config: {
     authApi: null,
@@ -160,7 +164,7 @@ export const Auth = {
     localStorage.removeItem(this._landingOverrideKey);
   },
 
-  // “Primary” means “not a utility route”
+  // "Primary" means "not a utility route"
   getPreferredLandingRoute(homePath = '/home') {
     const override = this.getPreferredLandingRouteOverride();
     if (override) return override;
@@ -171,7 +175,7 @@ export const Auth = {
     const flat = flattenRouteTree(tree);
     const visible = flat
       .filter(r => r.path && r.path.startsWith('/'))
-      .filter(r => !r.public) // only protected routes count as “app areas”
+      .filter(r => !r.public) // only protected routes count as "app areas"
       .filter(r => !r.utility && !this._utilityPaths.has(r.path))
       .filter(r => !r.requires || this.hasPermission(r.requires, r.requiredGroup));
 
@@ -288,7 +292,7 @@ export const Auth = {
       authApi: this._requireAuthApi(),
       provider,
       intent,
-      ...(nextUrl !== undefined && { nextUrl }),  // ← omitted entirely if not supplied
+      ...(nextUrl !== undefined && { nextUrl }),
       win: win || window,
     });
   },
@@ -308,15 +312,12 @@ export const Auth = {
 
   init() {
     const storedJwt = localStorage.getItem('jwt');
-    if (storedJwt) {
-      // Keep optimistic UI state from cached JWT
-      this.setToken(storedJwt);
-    } else {
-      this.setToken(null);
-    }
+    this.setToken(storedJwt || null);
 
-    // Handle OAuth callback if present (async, fire-and-forget)
-    this._handleOAuthReturnIfPresent();
+    // Store the promise so route guards and landing routes can await it
+    // before making any auth decisions. Always resolves (never rejects).
+    this._initPromise = this._handleOAuthReturnIfPresent().catch(() => {});
+    return this._initPromise;
   },
 };
 

@@ -89,15 +89,31 @@ export function compileRouteMap(routeTree, { loginComponent } = {}) {
  * Smart landing component:
  * - if authed: go to preferred landing route
  * - else: show login
+ *
+ * Awaits Auth._initPromise so that an OAuth return on the root path
+ * is handled before the landing decision is made.
  */
 export function LandingRoute(homePath = '/home') {
   return {
-    oninit() {
-      if (Auth.isAuthenticated) {
-        const dest = Auth.getPreferredLandingRoute(homePath);
-        if (dest && dest !== '/') m.route.set(dest);
-      }
+    oninit(vnode) {
+      vnode.state._authReady = false;
+      const p = Auth._initPromise ?? Promise.resolve();
+      p.then(() => {
+        vnode.state._authReady = true;
+        if (Auth.isAuthenticated) {
+          const dest = Auth.getPreferredLandingRoute(homePath);
+          if (dest && dest !== '/') m.route.set(dest);
+        }
+        // If not authenticated, fall through to view() which renders null
+        // (the login component is shown by the route guard on the target route,
+        // or the host app's root handler)
+        m.redraw();
+      });
     },
-    view: () => null
+    view(vnode) {
+      // Render nothing while waiting; after resolution either we've navigated
+      // away (authed) or we stay here and the host decides what to show.
+      return null;
+    }
   };
 }
