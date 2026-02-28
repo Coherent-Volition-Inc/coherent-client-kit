@@ -316,7 +316,10 @@ export const Auth = {
 
     // Store the promise so route guards and landing routes can await it
     // before making any auth decisions. Always resolves (never rejects).
-    this._initPromise = this._handleOAuthReturnIfPresent().catch(() => {});
+    this._initDone = false;
+    this._initPromise = this._handleOAuthReturnIfPresent()
+      .catch(() => {})
+      .then(() => { this._initDone = true; });
     return this._initPromise;
   },
 };

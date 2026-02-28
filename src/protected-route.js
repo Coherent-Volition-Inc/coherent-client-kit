@@ -9,20 +9,19 @@ const DefaultDenied = {
 export function ProtectedRouteFactory(LoginComponent, DeniedComponent = DefaultDenied) {
   return {
     oninit(vnode) {
-      // If Auth.init() has already resolved (normal page loads where a JWT
-      // was cached in localStorage) this is a no-op: the promise is already
-      // settled and the microtask queue drains before Mithril's first paint.
-      //
-      // If we're in the OAuth return window (no cached JWT yet, token exchange
-      // in flight) we hold off rendering the guard until the exchange either
-      // succeeds (Auth.isAuthenticated becomes true) or fails, then redraw.
-      // Either way _initPromise never rejects — auth.js catches internally.
-      vnode.state._authReady = false;
       const p = Auth._initPromise ?? Promise.resolve();
-      p.then(() => {
+
+      // If _initPromise is already settled, checking a flag avoids the
+      // microtask gap that can cause a missed render in history-API routing.
+      if (Auth._initDone) {
         vnode.state._authReady = true;
-        m.redraw();
-      });
+      } else {
+        vnode.state._authReady = false;
+        p.then(() => {
+          vnode.state._authReady = true;
+          m.redraw();
+        });
+      }
     },
 
     view(vnode) {
