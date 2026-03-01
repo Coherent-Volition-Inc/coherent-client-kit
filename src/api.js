@@ -7,10 +7,70 @@ function joinURL(base, endpoint) {
   const p = String(endpoint || '').replace(/^\/+/, '');
   return new URL(p, b).toString();
 }
+
 function isAbsolute(u) { return /^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(u); }
+
+function normalizeWsBase(base) {
+  // Accept ws(s):// or http(s):// (or schemeless //host)
+  let b = String(base || "").trim();
+  if (!b) return "";
+
+  // schemeless URLs: //example.com -> use current page scheme to infer ws/wss
+  if (b.startsWith("//")) {
+    const pageIsHttps = (window.location && window.location.protocol === "https:");
+    return (pageIsHttps ? "wss:" : "ws:") + b;
+  }
+
+  if (b.startsWith("ws://") || b.startsWith("wss://")) return b;
+  if (b.startsWith("http://")) return "ws://" + b.slice("http://".length);
+  if (b.startsWith("https://")) return "wss://" + b.slice("https://".length);
+
+  // If it’s relative like "/api" or "localhost:4050", let URL() resolve it:
+  // - "localhost:4050" is not a valid URL base; prefix with current scheme/host.
+  if (!isAbsolute(b)) {
+    const abs = new URL(b, window.location.origin).toString();
+    return normalizeWsBase(abs);
+  }
+  return b;
+}
+
+function buildSocketUrl(baseUrl, endpoint, params = {}) {
+  const base = normalizeWsBase(baseUrl);
+  const url = joinURL(base, endpoint);
+
+  const u = new URL(url);
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v === undefined || v === null) continue;
+    u.searchParams.set(k, String(v));
+  }
+  return u.toString();
+}
 
 const Api = {
   defaultTimeout: 20000,
+
+  socket(baseUrl, endpoint, params = {}, options = {}) {
+    const {
+      protocols,
+      log = false,
+      onOpen,
+      onMessage,
+      onClose,
+      onError,
+    } = options;
+
+    const wsUrl = buildSocketUrl(baseUrl, endpoint, params);
+    if (log) console.log("[Api.socket] connect", wsUrl);
+
+    const ws = protocols ? new WebSocket(wsUrl, protocols) : new WebSocket(wsUrl);
+
+    if (typeof onOpen === "function") ws.addEventListener("open", onOpen);
+    if (typeof onMessage === "function") ws.addEventListener("message", onMessage);
+    if (typeof onClose === "function") ws.addEventListener("close", onClose);
+    if (typeof onError === "function") ws.addEventListener("error", onError);
+
+    return ws;
+  },
 
   request(method, baseUrl, endpoint, options = {}) {
     const {
@@ -179,7 +239,14 @@ Api.authed = {
   post(b, e, p = {}, o = {}) { return Api.authedRequest('POST', b, e, { ...o, params: p }); },
   put(b, e, p = {}, o = {}) { return Api.authedRequest('PUT', b, e, { ...o, params: p }); },
   patch(b, e, p = {}, o = {}) { return Api.authedRequest('PATCH', b, e, { ...o, params: p }); },
-  delete(b, e, p = {}, o = {}) { return Api.authedRequest('DELETE', b, e, { ...o, params: p }); }
+  delete(b, e, p = {}, o = {}) { return Api.authedRequest('DELETE', b, e, { ...o, params: p }); },
+  socket(baseUrl, endpoint, params = {}, options = {}) {
+    const p = { ...(params || {}) };
+    if (p.jwt === undefined || p.jwt === null || p.jwt === "") {
+      if (Auth.jwt) p.jwt = Auth.jwt;
+    }
+    return Api.socket(baseUrl, endpoint, p, options);
+  }
 };
 
 export default Api;
