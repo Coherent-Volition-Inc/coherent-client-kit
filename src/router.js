@@ -109,7 +109,10 @@ export function LandingRoute(homePath) {
 
         if (Auth.isAuthenticated) {
           const dest = Auth.getPreferredLandingRoute(hp);
-          if (dest && dest !== '/') m.route.set(dest);
+          if (dest && dest !== '/' && m.route.get() !== dest) {
+            m.route.set(dest);
+            return;
+          }
         }
 
         m.redraw();
