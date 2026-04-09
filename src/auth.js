@@ -76,24 +76,34 @@ export const Auth = {
   // runtime config (set by host app)
   _config: {
     authApi: null,
-    homePath: '/home', // default landing path for OAuth completion
+    homePath: null,
   },
 
   configure(opts = {}) {
-    const {
-      authApi,
-      homePath,
-    } = opts;
+    const { authApi, homePath } = opts;
 
-    if (authApi != null) {
-      const s = String(authApi).trim().replace(/\/+$/, '');
-      this._config.authApi = s || null;
+    // --- authApi REQUIRED ---
+    if (authApi == null) {
+      throw new Error("Auth.configure: 'authApi' is required");
     }
 
-    if (homePath != null) {
-      const hp = String(homePath).trim();
-      if (hp) this._config.homePath = hp;
+    const api = String(authApi).trim().replace(/\/+$/, '');
+    if (!api) {
+      throw new Error("Auth.configure: 'authApi' must be a non-empty string");
     }
+
+    // --- homePath REQUIRED ---
+    if (homePath == null) {
+      throw new Error("Auth.configure: 'homePath' is required");
+    }
+
+    const hp = String(homePath).trim();
+    if (!hp || !hp.startsWith('/')) {
+      throw new Error("Auth.configure: 'homePath' must be a non-empty absolute path (e.g. '/home')");
+    }
+
+    this._config.authApi = api;
+    this._config.homePath = hp;
 
     return this;
   },
@@ -104,6 +114,14 @@ export const Auth = {
       throw new Error('Auth is not configured. Call Auth.configure({ authApi }) before use.');
     }
     return v;
+  },
+
+  _requireHomePath() {
+    const hp = this._config?.homePath;
+    if (!hp) {
+      throw new Error("Auth is not configured. Call Auth.configure({ authApi, homePath }) before use.");
+    }
+    return hp;
   },
 
   setRouteTree(tree) {
@@ -165,27 +183,38 @@ export const Auth = {
   },
 
   // "Primary" means "not a utility route"
-  getPreferredLandingRoute(homePath = '/home') {
-    const override = this.getPreferredLandingRouteOverride();
-    if (override) return override;
+  getPreferredLandingRoute(homePath) {
+    const hp = String(homePath || '').trim();
+    if (!hp) {
+      throw new Error("Auth.getPreferredLandingRoute(homePath): homePath is required");
+    }
 
     const tree = this._routeTree;
-    if (!tree) return homePath;
+    if (!tree) return hp;
 
     const flat = flattenRouteTree(tree);
     const visible = flat
-      .filter(r => r.path && r.path.startsWith('/'))
-      .filter(r => !r.public) // only protected routes count as "app areas"
-      .filter(r => !r.utility && !this._utilityPaths.has(r.path))
-      .filter(r => !r.requires || this.hasPermission(r.requires, r.requiredGroup));
+          .filter(r => r.path && r.path.startsWith('/'))
+          .filter(r => r.path !== '/') // root landing route is not a destination
+          .filter(r => !r.public) // only protected routes count as "app areas"
+          .filter(r => !r.utility && !this._utilityPaths.has(r.path))
+          .filter(r => !r.requires || this.hasPermission(r.requires, r.requiredGroup));
 
     const uniq = Array.from(new Set(visible.map(r => r.path)));
-    if (uniq.length === 2 && uniq.includes(homePath)) {
-      const other = uniq.find(p => p !== homePath);
+
+    const override = this.getPreferredLandingRouteOverride();
+    if (override && uniq.includes(override)) return override;
+
+    if (uniq.length === 2 && uniq.includes(hp)) {
+      const other = uniq.find(p => p !== hp);
       if (other) return other;
     }
 
-    return homePath;
+    if (uniq.includes(hp)) return hp;
+    if (uniq.length > 0) return uniq[0];
+
+    // Caller-provided fallback
+    return hp;
   },
 
   // ------------------------------------------------------------------
@@ -301,7 +330,7 @@ export const Auth = {
   async _handleOAuthReturnIfPresent() {
     return handleOAuthReturnIfPresent({
       auth: this,
-      homePath: this._config.homePath || '/home',
+      homePath: this._requireHomePath(),
       navigate: (path) => {
         if (m?.route?.set) m.route.set(path);
       },
@@ -311,6 +340,8 @@ export const Auth = {
   },
 
   init() {
+    this._requireAuthApi();
+    this._requireHomePath();
     const storedJwt = localStorage.getItem('jwt');
     this.setToken(storedJwt || null);
 
