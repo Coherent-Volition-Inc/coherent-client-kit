@@ -293,7 +293,6 @@ export const Auth = {
     return this._refreshPromise;
   },
 
-  // Optional helper if you want this module to own password login too
   async loginWithPassword(username, password) {
     const authApi = this._requireAuthApi();
 
@@ -309,6 +308,31 @@ export const Auth = {
     }
 
     throw new Error(response?.message || 'Authentication failed');
+  },
+
+  async changePassword({ currentPassword, newPassword }) {
+    const authApi = this._requireAuthApi();
+
+    const body = currentPassword
+          ? { current_password: currentPassword, new_password: newPassword }
+          : { new_password: newPassword };
+
+    const response = await fetch(`${authApi}/api/me/password`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', ...(this.jwt ? { Authorization: `Bearer ${this.jwt}` } : {}) },
+      body: JSON.stringify(body),
+    });
+
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const err = new Error(payload?.message || `HTTP ${response.status}`);
+      err.code = response.status;
+      throw err;
+    }
+
+    if (payload?.jwt) this.setToken(payload.jwt);
+    return payload;
   },
 
   // ------------------------------------------------------------------
