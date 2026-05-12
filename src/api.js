@@ -46,6 +46,17 @@ function buildSocketUrl(baseUrl, endpoint, params = {}) {
   return u.toString();
 }
 
+async function parseResponse(res, responseType = 'auto') {
+  if (responseType === 'response') return res;
+  if (responseType === 'blob') return res.blob();
+  if (responseType === 'arrayBuffer') return res.arrayBuffer();
+  if (responseType === 'text') return res.text();
+  if (responseType === 'json') return res.json();
+
+  const ct = res.headers.get('content-type') || '';
+  return ct.includes('application/json') ? res.json() : res.text();
+}
+
 const Api = {
   defaultTimeout: 20000,
 
@@ -78,7 +89,8 @@ const Api = {
       headers = {},
       timeout = this.defaultTimeout,
       onprogress,
-      credentials = undefined, // NEW: 'include' | 'same-origin' | 'omit'
+      credentials = undefined, // 'include' | 'same-origin' | 'omit'
+      responseType = 'auto',   // 'auto' | 'json' | 'text' | 'blob' | 'arrayBuffer' | 'response'
     } = options;
 
     const upper = method.toUpperCase();
@@ -93,19 +105,23 @@ const Api = {
       url += (url.includes('?') ? '&' : '?') + qs;
     }
 
-    // Use fetch for streaming OR any absolute URL (avoids mithril route parser on ports)
-    const useFetch = !!onprogress || isAbsolute(url);
+    // Use fetch for streaming, absolute URLs, or explicit response typing.
+    // Explicit responseType forces fetch so callers can request blob/arrayBuffer/raw response
+    // even for relative URLs.
+    const useFetch = !!onprogress || isAbsolute(url) || responseType !== 'auto';
 
     if (!useFetch) {
-      // Mithril path (relative URLs only)
+      // Mithril path (relative URLs only, default auto parsing)
       const requestOptions = { method: upper, url, headers, timeout };
       if (isBodyMethod) requestOptions.body = params; // object or FormData; mithril handles both
       return m.request(requestOptions);
     }
 
-    // ---- Fetch path (streaming or absolute URLs) ----
+    // ---- Fetch path (streaming, absolute URLs, or explicit response types) ----
     const fetchHeaders = { ...headers };
-    if (onprogress && !fetchHeaders['Accept']) fetchHeaders['Accept'] = 'application/x-ndjson';
+    if (onprogress && !fetchHeaders['Accept']) {
+      fetchHeaders['Accept'] = 'application/x-ndjson';
+    }
 
     const controller = new AbortController();
     const tid = timeout > 0 ? setTimeout(() => controller.abort(), timeout) : null;
@@ -116,7 +132,7 @@ const Api = {
       signal: controller.signal,
     };
 
-    // NEW: allow cookie-based flows when calling auth server cross-origin
+    // Allow cookie-based flows when calling auth server cross-origin
     if (credentials) fetchOpts.credentials = credentials;
 
     if (isBodyMethod) {
@@ -183,8 +199,7 @@ const Api = {
           throw err;
         }
 
-        const ct = res.headers.get('content-type') || '';
-        return ct.includes('application/json') ? res.json() : res.text();
+        return parseResponse(res, responseType);
       })
       .finally(() => {
         if (tid) clearTimeout(tid);
@@ -200,6 +215,7 @@ const Api = {
       timeout = this.defaultTimeout,
       onprogress,
       credentials,
+      responseType = 'auto',
     } = options;
 
     const authHeaders = Auth.jwt ? { ...headers, Authorization: `Bearer ${Auth.jwt}` } : headers;
@@ -210,6 +226,7 @@ const Api = {
       timeout,
       onprogress,
       credentials,
+      responseType,
     }).catch(err => {
       if (err && err.code === 403) {
         // Refresh is cookie-only now (Auth.refreshJwt sends credentials: 'include')
@@ -220,6 +237,7 @@ const Api = {
             timeout,
             onprogress,
             credentials,
+            responseType,
           })
         );
       }
