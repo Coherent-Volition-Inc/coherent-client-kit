@@ -134,13 +134,14 @@ export const Auth = {
 
   hasPermission(ability, userGroup) {
     if (!ability) return true;
+    const abilities = Array.isArray(ability) ? ability : [ability];
 
     for (const p of this.permissions) {
       const group = Array.isArray(p) ? p[0] : p?.user_group;
       const ab = Array.isArray(p) ? p[1] : p?.group_ability;
       if (!group || !ab) continue;
 
-      const ability_ok = (ab === ability) || (ab === "*");
+      const ability_ok = (ab === "*") || abilities.some((a) => ab === a);
       const group_ok = (userGroup == null) || (group === userGroup) || (group === "*");
 
       if (ability_ok && group_ok) return true;
