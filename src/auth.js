@@ -183,38 +183,125 @@ export const Auth = {
     localStorage.removeItem(this._landingOverrideKey);
   },
 
-  // "Primary" means "not a utility route"
-  getPreferredLandingRoute(homePath) {
+  _routeMatchesPath(pattern, actualPath) {
+    function cleanPath(value) {
+      const s = String(value || '')
+            .trim()
+            .split(/[?#]/, 1)[0];
+
+      if (!s) return '/';
+      return s.length > 1 ? s.replace(/\/+$/, '') : s;
+    }
+
+    const expected = cleanPath(pattern);
+    const actual = cleanPath(actualPath);
+
+    // Supports Mithril route parameters:
+    //   /audio/:id
+    //   /files/:path...
+    const source = expected
+          .split('/')
+          .map(segment => {
+            if (!segment) return '';
+
+            if (/^:[^/]+\.\.\.$/.test(segment)) {
+              return '.+';
+            }
+
+            if (/^:[^/]+$/.test(segment)) {
+              return '[^/]+';
+            }
+
+            return segment.replace(
+              /[.*+?^${}()|[\]\\]/g,
+              '\\$&'
+            );
+          })
+          .join('/');
+
+    return new RegExp(`^${source}/?$`).test(actual);
+  },
+
+  getPreferredLandingRoute(
+    homePath,
+    currentPath = m?.route?.get?.()
+  ) {
     const hp = String(homePath || '').trim();
+
     if (!hp) {
-      throw new Error("Auth.getPreferredLandingRoute(homePath): homePath is required");
+      throw new Error(
+        'Auth.getPreferredLandingRoute(homePath): homePath is required'
+      );
     }
 
     const tree = this._routeTree;
     if (!tree) return hp;
 
     const flat = flattenRouteTree(tree);
+
+    // First preference: remain at the protected route where login
+    // was requested.
+    const current = String(currentPath || '').trim();
+
+    if (current && current !== '/') {
+      const interruptedRoute = flat.find(route =>
+        route.path &&
+          (route.component || route.redirectTo) &&
+          !route.public &&
+          this._routeMatchesPath(route.path, current) &&
+          (
+            !route.requires ||
+              this.hasPermission(
+                route.requires,
+                route.requiredGroup
+              )
+          )
+      );
+
+      if (interruptedRoute) {
+        return current;
+      }
+    }
+
+    // Otherwise use the normal application landing heuristics.
     const visible = flat
-          .filter(r => r.path && r.path.startsWith('/'))
-          .filter(r => r.path !== '/') // root landing route is not a destination
-          .filter(r => !r.public) // only protected routes count as "app areas"
-          .filter(r => !r.utility && !this._utilityPaths.has(r.path))
-          .filter(r => !r.requires || this.hasPermission(r.requires, r.requiredGroup));
+          .filter(route =>
+            route.path &&
+              route.path.startsWith('/')
+          )
+          .filter(route => route.path !== '/')
+          .filter(route => !route.public)
+          .filter(route =>
+            !route.utility &&
+              !this._utilityPaths.has(route.path)
+          )
+          .filter(route =>
+            !route.requires ||
+              this.hasPermission(
+                route.requires,
+                route.requiredGroup
+              )
+          );
 
-    const uniq = Array.from(new Set(visible.map(r => r.path)));
+    const uniq = Array.from(
+      new Set(visible.map(route => route.path))
+    );
 
-    const override = this.getPreferredLandingRouteOverride();
-    if (override && uniq.includes(override)) return override;
+    const override =
+          this.getPreferredLandingRouteOverride();
+
+    if (override && uniq.includes(override)) {
+      return override;
+    }
 
     if (uniq.length === 2 && uniq.includes(hp)) {
-      const other = uniq.find(p => p !== hp);
+      const other = uniq.find(path => path !== hp);
       if (other) return other;
     }
 
     if (uniq.includes(hp)) return hp;
     if (uniq.length > 0) return uniq[0];
 
-    // Caller-provided fallback
     return hp;
   },
 
