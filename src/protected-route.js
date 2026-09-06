@@ -28,14 +28,15 @@ export function ProtectedRouteFactory(LoginComponent, DeniedComponent = DefaultD
     _refreshPermissions(vnode) {
       if (
         vnode.state._permissionRefreshStarted ||
-        vnode.state._permissionRefreshDone
+          vnode.state._permissionRefreshDone
       ) return;
 
       vnode.state._permissionRefreshStarted = true;
 
-      Auth.refreshJwt()
+      Auth.refreshJwt({ logoutOnFailure:false })
         .catch(() => {
-          // refreshJwt() already logs out on refresh failure.
+          // This is only an opportunistic permission refresh.
+          // The existing authenticated session remains intact.
         })
         .finally(() => {
           vnode.state._permissionRefreshStarted = false;

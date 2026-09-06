@@ -612,41 +612,32 @@ export const Auth = {
 
   _refreshPromise: null,
 
-  async refreshJwt() {
-    if (this._refreshPromise) {
-      return this._refreshPromise;
-    }
+  async refreshJwt({ logoutOnFailure = true } = {}) {
+    if (this._refreshPromise) return this._refreshPromise;
 
     this._refreshPromise = (async () => {
       try {
-        const authApi =
-          this._requireAuthApi();
+        const authApi = this._requireAuthApi();
 
-        // Cookie-based refresh: no body token, include credentials.
         const response = await _postJson(
           `${authApi}/api/token`,
           null,
-          { credentials: 'include' }
+          { credentials:'include' }
         );
 
-        if (
-          response &&
-          response.jwt
-        ) {
+        if (response?.jwt) {
           this.setToken(response.jwt);
           return response;
         }
 
         throw new Error(
           response?.message ||
-          'Token refresh failed - no JWT in response'
+            'Token refresh failed - no JWT in response'
         );
       } catch (e) {
-        // Preserve the current protected route before clearing auth state.
-        this.logout({
-          rememberCurrentPath: true,
-        });
-
+        if (logoutOnFailure) {
+          this.logout({ rememberCurrentPath:true });
+        }
         throw e;
       } finally {
         this._refreshPromise = null;
