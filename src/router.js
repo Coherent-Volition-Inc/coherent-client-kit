@@ -34,15 +34,13 @@ function normalizeNode(node, parentMeta = {}, parentPath = '') {
   return { ...node, path: absPath, ...meta };
 }
 
-function wrapIfProtected(route, LoginComponent) {
+function wrapIfProtected(route, LoginComponent, DeniedComponent) {
   if (route.public) return route.component;
 
-  // redirectTo is allowed instead of component
   const comp = route.component || (route.redirectTo ? RedirectTo(route.redirectTo) : null);
   if (!comp) throw new Error(`Route ${route.path} missing component or redirectTo`);
 
-  // If requires is defined on route, pass it through attrs.
-  const ProtectedRoute = ProtectedRouteFactory(LoginComponent);
+  const ProtectedRoute = ProtectedRouteFactory(LoginComponent, DeniedComponent);
 
   return {
     view(vnode) {
@@ -56,13 +54,10 @@ function wrapIfProtected(route, LoginComponent) {
   };
 }
 
-/**
- * Compile a tree into a Mithril route map.
- *
- * Options:
- *  - loginComponent: required (what to show when not authed)
- */
-export function compileRouteMap(routeTree, { loginComponent } = {}) {
+export function compileRouteMap(routeTree, {
+  loginComponent,
+  deniedComponent
+} = {}) {
   if (!loginComponent) throw new Error("compileRouteMap: loginComponent is required");
 
   const map = {};
@@ -71,10 +66,9 @@ export function compileRouteMap(routeTree, { loginComponent } = {}) {
     for (const n of (nodes || [])) {
       const r = normalizeNode(n, parentMeta, parentPath);
 
-      // If node has component or redirectTo, it becomes a routable leaf
       const isLeaf = !!r.component || !!r.redirectTo;
       if (isLeaf) {
-        map[r.path] = wrapIfProtected(r, loginComponent);
+        map[r.path] = wrapIfProtected(r, loginComponent, deniedComponent);
       }
 
       if (r.children?.length) walk(r.children, r, r.path);

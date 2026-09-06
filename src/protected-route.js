@@ -9,19 +9,39 @@ const DefaultDenied = {
 export function ProtectedRouteFactory(LoginComponent, DeniedComponent = DefaultDenied) {
   return {
     oninit(vnode) {
+      vnode.state._authReady = false;
+      vnode.state._permissionRefreshStarted = false;
+      vnode.state._permissionRefreshDone = false;
+
       const p = Auth._initPromise ?? Promise.resolve();
 
-      // If _initPromise is already settled, checking a flag avoids the
-      // microtask gap that can cause a missed render in history-API routing.
       if (Auth._initDone) {
         vnode.state._authReady = true;
       } else {
-        vnode.state._authReady = false;
         p.then(() => {
           vnode.state._authReady = true;
           m.redraw();
         });
       }
+    },
+
+    _refreshPermissions(vnode) {
+      if (
+        vnode.state._permissionRefreshStarted ||
+        vnode.state._permissionRefreshDone
+      ) return;
+
+      vnode.state._permissionRefreshStarted = true;
+
+      Auth.refreshJwt()
+        .catch(() => {
+          // refreshJwt() already logs out on refresh failure.
+        })
+        .finally(() => {
+          vnode.state._permissionRefreshStarted = false;
+          vnode.state._permissionRefreshDone = true;
+          m.redraw();
+        });
     },
 
     view(vnode) {
@@ -31,11 +51,21 @@ export function ProtectedRouteFactory(LoginComponent, DeniedComponent = DefaultD
 
       const comp = vnode.attrs.component;
       const requiredAbility = vnode.attrs.requires ?? comp?.requires;
-      const requiredGroup   = vnode.attrs.requiredGroup ?? comp?.requiredGroup;
+      const requiredGroup = vnode.attrs.requiredGroup ?? comp?.requiredGroup;
 
       if (requiredAbility && !Auth.hasPermission(requiredAbility, requiredGroup)) {
+        if (!vnode.state._permissionRefreshDone) {
+          this._refreshPermissions(vnode);
+
+          return m(
+            '.min-h-screen.flex.items-center.justify-center.text-gray-500',
+            'Checking access…'
+          );
+        }
+
         return m(DeniedComponent);
       }
+
       return m(comp, vnode.attrs);
     }
   };
