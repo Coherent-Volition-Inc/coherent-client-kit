@@ -50,6 +50,8 @@ export {
   Api,
   Auth,
   decodeJwt,
+  UserState,
+  createUserState,
 
   // oauth helpers (flat)
   oauthQueryParams,
@@ -76,6 +78,8 @@ export default {
   Api,
   Auth,
   decodeJwt,
+  UserState,
+  createUserState,
   oauth,
   router,
 };
