@@ -1,6 +1,6 @@
 {
   "name": "coherent-client-kit",
-  "version": "0.0.19",
+  "version": "0.0.20",
   "type": "module",
   "packageManager": "yarn@1.22.22",
   "main": "./dist/index.cjs",
@@ -15,11 +15,7 @@
       "require": "./dist/mithril.cjs"
     }
   },
-  "files": [
-    "dist",
-    "README.md",
-    "LICENSE"
-  ],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "vitest run",

@@ -9,8 +9,10 @@
 // This file re-exports the library surface both as named exports and
 // as grouped namespaces (`oauth`, `router`) for convenience.
 
-import Api from './api.js';
-import { Auth, decodeJwt } from './auth.js';
+import Api from "./api.js";
+import { Auth, decodeJwt } from "./auth.js";
+
+import UserState, { createUserState } from "./user-state.js";
 
 import {
   oauthQueryParams,
@@ -20,10 +22,10 @@ import {
   buildOAuthStartUrl,
   startOAuthFlow,
   handleOAuthReturnIfPresent,
-} from './oauth.js';
+} from "./oauth.js";
 
-import { ProtectedRouteFactory } from './protected-route.js';
-import { RedirectTo, compileRouteMap, LandingRoute } from './router.js';
+import { ProtectedRouteFactory } from "./protected-route.js";
+import { RedirectTo, compileRouteMap, LandingRoute } from "./router.js";
 
 // Grouped convenience namespaces (so CVKit.oauth.* / CVKit.router.* works)
 const oauth = {
