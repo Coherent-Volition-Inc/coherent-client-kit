@@ -1,6 +1,5 @@
 // src/auth.js
 import { requestMfaCode } from './mfa.js';
-import { requestNewPassword } from './password-reset.js';
 import { handleOAuthReturnIfPresent, startOAuthFlow } from './oauth.js';
 
 const m = window.m;
@@ -195,8 +194,6 @@ export const Auth = {
 
     if (opts.requestMfaCode !== undefined && typeof opts.requestMfaCode !== 'function') throw new TypeError('requestMfaCode must be a function');
     this._config.requestMfaCode = opts.requestMfaCode || requestMfaCode;
-    if (opts.requestNewPassword !== undefined && typeof opts.requestNewPassword !== 'function') throw new TypeError('requestNewPassword must be a function');
-    this._config.requestNewPassword = opts.requestNewPassword || requestNewPassword;
     this._config.authApi = api;
     this._config.homePath = hp;
 
@@ -570,7 +567,7 @@ export const Auth = {
 
       this.user = payload.user || null;
       this.iss = payload.iss || null;
-      this.permissions = Array.isArray(
+      this.permissions = !payload.purpose && Array.isArray(
         payload.user?.permissions
       )
         ? payload.user.permissions
@@ -694,41 +691,9 @@ export const Auth = {
   async _finishLogin(response) {
     if (response?.status === 'mfa_required') return this.completeMfa(response.challenge);
     if (response?.status === 'ok' && response.jwt) {
-      if (decodeJwt(response.jwt).purpose === 'password_reset') return this.completePasswordReset(response.jwt);
       this.setToken(response.jwt); return response;
     }
     throw new Error(response?.message || 'Authentication failed');
-  },
-
-  async completePasswordReset(resetJwt) {
-    if (decodeJwt(resetJwt).purpose !== 'password_reset') throw new Error('Password-reset credential required');
-    this.setToken(resetJwt); // memory only; never a normal authenticated session
-    let error = '';
-    try {
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const password = await (this._config.requestNewPassword || requestNewPassword)({ error, attempt });
-        if (password == null) {
-          const cancelled = new Error('Password reset cancelled; request a new one-time credential to try again.');
-          cancelled.code = 'PASSWORD_RESET_CANCELLED'; throw cancelled;
-        }
-        if (this.jwt !== resetJwt) throw new Error('Password reset superseded by another sign-in.');
-        const claims = decodeJwt(resetJwt);
-        if (!claims.exp || claims.exp * 1000 <= Date.now()) {
-          const expired = new Error('Password-reset session expired; request a new one-time credential.');
-          expired.code = 'PASSWORD_RESET_EXPIRED'; throw expired;
-        }
-        const length = typeof password === 'string' ? new TextEncoder().encode(password).length : 0;
-        if (length < 8 || length > 4096) { error = 'Use a password of 8–4096 UTF-8 bytes.'; continue; }
-        try { return await this.changePassword({ newPassword: password }); }
-        catch (e) {
-          if (e.code !== 400) throw e;
-          error = e.message;
-        }
-      }
-      throw new Error('Password reset was not completed. Request a new one-time credential.');
-    } finally {
-      if (this.jwt === resetJwt) this.setToken(null);
-    }
   },
 
   async changePassword({
