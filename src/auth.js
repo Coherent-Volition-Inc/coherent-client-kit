@@ -1,4 +1,6 @@
 // src/auth.js
+import { requestMfaCode } from './mfa.js';
+import { requestNewPassword } from './password-reset.js';
 import { handleOAuthReturnIfPresent, startOAuthFlow } from './oauth.js';
 
 const m = window.m;
@@ -191,6 +193,10 @@ export const Auth = {
       );
     }
 
+    if (opts.requestMfaCode !== undefined && typeof opts.requestMfaCode !== 'function') throw new TypeError('requestMfaCode must be a function');
+    this._config.requestMfaCode = opts.requestMfaCode || requestMfaCode;
+    if (opts.requestNewPassword !== undefined && typeof opts.requestNewPassword !== 'function') throw new TypeError('requestNewPassword must be a function');
+    this._config.requestNewPassword = opts.requestNewPassword || requestNewPassword;
     this._config.authApi = api;
     this._config.homePath = hp;
 
@@ -553,10 +559,12 @@ export const Auth = {
 
   setToken(jwt) {
     this.jwt = jwt || null;
-    this.isAuthenticated = !!jwt;
+    this.isAuthenticated = !!jwt && !decodeJwt(jwt).purpose;
 
     if (jwt) {
-      localStorage.setItem('jwt', jwt);
+      const restricted = decodeJwt(jwt).purpose;
+      if (restricted) localStorage.removeItem('jwt');
+      else localStorage.setItem('jwt', jwt);
 
       const payload = decodeJwt(jwt);
 
@@ -613,17 +621,16 @@ export const Auth = {
   _refreshPromise: null,
 
   async refreshJwt({ logoutOnFailure = true } = {}) {
+    if (this.jwt && decodeJwt(this.jwt).purpose) throw new Error('Password-reset credentials cannot refresh');
     if (this._refreshPromise) return this._refreshPromise;
 
     this._refreshPromise = (async () => {
       try {
         const authApi = this._requireAuthApi();
 
-        const response = await _postJson(
-          `${authApi}/api/token`,
-          null,
-          { credentials:'include' }
-        );
+        const refresh = () => _postJson(`${authApi}/api/token`, null, { credentials: 'include' });
+        const locks = globalThis.navigator?.locks;
+        const response = locks ? await locks.request(`cvkit:refresh:${authApi}`, refresh) : await refresh();
 
         if (response?.jwt) {
           this.setToken(response.jwt);
@@ -662,18 +669,66 @@ export const Auth = {
       }
     );
 
-    if (
-      response?.status === 'ok' &&
-      response.jwt
-    ) {
-      this.setToken(response.jwt);
-      return response;
-    }
+    return this._finishLogin(response);
+  },
 
-    throw new Error(
-      response?.message ||
-      'Authentication failed'
-    );
+  async completeMfa(challenge) {
+    if (typeof challenge !== 'string' || !challenge) throw new Error('Missing MFA challenge');
+    let error = '';
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const code = await (this._config.requestMfaCode || requestMfaCode)({ error, attempt });
+      if (code == null) { const cancelled = new Error('Two-factor authentication cancelled'); cancelled.code = 'MFA_CANCELLED'; throw cancelled; }
+      try {
+        const result = await _postJson(`${this._requireAuthApi()}/api/mfa/authenticate`, { challenge, code: String(code) }, { credentials: 'include' });
+        if (result?.status !== 'ok' || !result.jwt) throw new Error('Invalid MFA response');
+        this.setToken(result.jwt);
+        return result;
+      } catch (err) {
+        if (err.code !== 403) throw err;
+        error = 'Code not accepted. Try again, or sign in again if the challenge expired.';
+      }
+    }
+    throw new Error('Two-factor authentication failed; sign in again');
+  },
+
+  async _finishLogin(response) {
+    if (response?.status === 'mfa_required') return this.completeMfa(response.challenge);
+    if (response?.status === 'ok' && response.jwt) {
+      if (decodeJwt(response.jwt).purpose === 'password_reset') return this.completePasswordReset(response.jwt);
+      this.setToken(response.jwt); return response;
+    }
+    throw new Error(response?.message || 'Authentication failed');
+  },
+
+  async completePasswordReset(resetJwt) {
+    if (decodeJwt(resetJwt).purpose !== 'password_reset') throw new Error('Password-reset credential required');
+    this.setToken(resetJwt); // memory only; never a normal authenticated session
+    let error = '';
+    try {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const password = await (this._config.requestNewPassword || requestNewPassword)({ error, attempt });
+        if (password == null) {
+          const cancelled = new Error('Password reset cancelled; request a new one-time credential to try again.');
+          cancelled.code = 'PASSWORD_RESET_CANCELLED'; throw cancelled;
+        }
+        if (this.jwt !== resetJwt) throw new Error('Password reset superseded by another sign-in.');
+        const claims = decodeJwt(resetJwt);
+        if (!claims.exp || claims.exp * 1000 <= Date.now()) {
+          const expired = new Error('Password-reset session expired; request a new one-time credential.');
+          expired.code = 'PASSWORD_RESET_EXPIRED'; throw expired;
+        }
+        const length = typeof password === 'string' ? new TextEncoder().encode(password).length : 0;
+        if (length < 8 || length > 4096) { error = 'Use a password of 8–4096 UTF-8 bytes.'; continue; }
+        try { return await this.changePassword({ newPassword: password }); }
+        catch (e) {
+          if (e.code !== 400) throw e;
+          error = e.message;
+        }
+      }
+      throw new Error('Password reset was not completed. Request a new one-time credential.');
+    } finally {
+      if (this.jwt === resetJwt) this.setToken(null);
+    }
   },
 
   async changePassword({
@@ -723,10 +778,11 @@ export const Auth = {
       throw err;
     }
 
-    if (payload?.jwt) {
-      this.setToken(payload.jwt);
+    if (payload?.status === 'mfa_required') {
+      this.setToken(null);
+      return this.completeMfa(payload.challenge);
     }
-
+    if (payload?.jwt) this.setToken(payload.jwt);
     return payload;
   },
 

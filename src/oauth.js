@@ -8,6 +8,7 @@ const OAUTH_PARAM_KEYS = [
   'error',
   'provider',
   'message',
+  'mfa_challenge',
 ];
 
 export function oauthQueryParams(win = window) {
@@ -218,15 +219,17 @@ export async function handleOAuthReturnIfPresent({
 
   const linked =
     q.get('linked') === '1';
+  const challenge = q.get('mfa_challenge');
 
   // Remove callback parameters before refreshing. If refresh fails,
   // Auth.refreshJwt() may remember the current route; it should remember
   // the clean application route rather than the OAuth callback URL.
   stripOAuthParamsFromUrl(win);
 
-  if (login) {
+  if (login || challenge) {
     try {
-      await auth.refreshJwt();
+      if (challenge) await auth.completeMfa(challenge);
+      else await auth.refreshJwt();
 
       const dest =
         auth.getPreferredLandingRoute(homePath);

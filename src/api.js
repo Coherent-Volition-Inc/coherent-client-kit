@@ -1,5 +1,5 @@
 // src/api.js
-import { Auth } from './auth.js';
+import { Auth, decodeJwt } from './auth.js';
 const m = window.m;
 
 function joinURL(base, endpoint) {
@@ -149,6 +149,7 @@ const Api = {
         const txt = await res.text().catch(() => '');
         const err = new Error(`HTTP ${res.status}${txt ? `: ${txt}` : ''}`);
         err.code = res.status;
+        try { err.response = JSON.parse(txt); } catch {}
         throw err;
       }
       if (!res.body) return null;
@@ -196,6 +197,7 @@ const Api = {
           const txt = await res.text().catch(() => '');
           const err = new Error(`HTTP ${res.status}${txt ? `: ${txt}` : ''}`);
           err.code = res.status;
+          try { err.response = JSON.parse(txt); } catch {}
           throw err;
         }
 
@@ -228,7 +230,10 @@ const Api = {
       credentials,
       responseType,
     }).catch(err => {
-      if (err && err.code === 403) {
+      let claims = {};
+      try { if (Auth.jwt) claims = decodeJwt(Auth.jwt); } catch {}
+      if (!claims.purpose && err && (err.code === 401 || (err.code === 403 &&
+          (err.response?.code === 'invalid_token' || (claims.exp && claims.exp * 1000 <= Date.now()))))) {
         // Refresh is cookie-only now (Auth.refreshJwt sends credentials: 'include')
         return Auth.refreshJwt().then(() =>
           this.request(method, baseUrl, endpoint, {
