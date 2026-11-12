@@ -71,10 +71,17 @@ const Api = {
     } = options;
 
     const wsUrl = buildSocketUrl(baseUrl, endpoint, params);
-    if (log) console.log("[Api.socket] connect", wsUrl);
+    if (log) {
+      const safe = new URL(wsUrl);
+      if (safe.searchParams.has('jwt')) safe.searchParams.set('jwt', '[redacted]');
+      console.log('[Api.socket] connect', safe.toString());
+    }
 
     const ws = protocols ? new WebSocket(wsUrl, protocols) : new WebSocket(wsUrl);
 
+    // Authentication renewal must run before application onOpen callbacks,
+    // since those callbacks often send a room.join immediately.
+    if (typeof options.onCreate === 'function') options.onCreate(ws);
     if (typeof onOpen === "function") ws.addEventListener("open", onOpen);
     if (typeof onMessage === "function") ws.addEventListener("message", onMessage);
     if (typeof onClose === "function") ws.addEventListener("close", onClose);
@@ -268,7 +275,103 @@ Api.authed = {
     if (p.jwt === undefined || p.jwt === null || p.jwt === "") {
       if (Auth.jwt) p.jwt = Auth.jwt;
     }
-    return Api.socket(baseUrl, endpoint, p, options);
+    // A newly refreshed JWT is sent in-band to the existing socket; unlike
+    // reconnecting, this preserves all server-side subscriptions and state.
+    const ws = Api.socket(baseUrl, endpoint, p, {
+      ...options,
+      onCreate(ws) {
+        if (options.autoRenew !== false) Auth.registerChannel(ws, {sendOnOpen:false, onRenewed:options.onRenewed});
+        options.onCreate?.(ws);
+      },
+    });
+    ws.addEventListener('close', (event) => {
+      // A suspended tab can miss its refresh timer. Prompt a refresh when
+      // an old server explicitly closes an expired lease; apps may reconnect.
+      if (event.code === 4001 && Auth.isAuthenticated)
+        Auth.refreshJwt({logoutOnFailure:false}).catch(() => {});
+    });
+    return ws;
+  },
+
+  /** A reconnecting *logical* socket. Unlike socket(), returns a controller.
+   * onOpen runs after every physical connection; onResume runs on reconnect
+   * so the application can fetch a current snapshot and rejoin subscriptions.
+   * JWT rotation on a healthy transport needs no reconnection at all.
+   */
+  liveSocket(baseUrl, endpoint, params = {}, options = {}) {
+    const {
+      onOpen, onMessage, onClose, onError, onResume, onStateChange,
+      retryBaseMs = 1000, retryMaxMs = 60000,
+    } = options;
+    let stopped = false, current = null, timer = null, failures = 0, everOpened = false;
+    let generation = 0;
+    const state = (name, detail = null) => { try { onStateChange?.(name, detail); } catch (e) { console.error(e); } };
+    const controller = {
+      get socket() { return current; },
+      get readyState() { return current?.readyState ?? 3; },
+      send(data) {
+        if (!current || current.readyState !== WebSocket.OPEN) return false;
+        try { current.send(data); return true; } catch { return false; }
+      },
+      close() {
+        stopped = true; generation++;
+        if (timer != null) clearTimeout(timer);
+        timer = null;
+        if (current) { try { current.close(); } catch {} }
+        current = null;
+        state('closed');
+      },
+    };
+    const schedule = (detail) => {
+      if (stopped) return;
+      if (!Auth.isAuthenticated) { controller.close(); return; }
+      const wait = Math.min(retryMaxMs, retryBaseMs * 2 ** Math.min(failures++, 8));
+      state('reconnecting', detail);
+      timer = setTimeout(() => { timer = null; connect(); }, wait);
+      timer?.unref?.();
+    };
+    const connect = async () => {
+      if (stopped) return;
+      const id = ++generation;
+      try {
+        // If a suspended tab missed the pre-expiry timer, refresh *before*
+        // attempting a new authenticated WebSocket upgrade.
+        let claims;
+        try { claims = Auth.jwt && decodeJwt(Auth.jwt); } catch {}
+        if (claims?.exp && claims.exp * 1000 - Date.now() < 10000)
+          await Auth.refreshJwt();
+        if (stopped || id !== generation) return;
+        if (!Auth.isAuthenticated || !Auth.jwt) { controller.close(); return; }
+        state(everOpened ? 'reconnecting' : 'connecting');
+        current = Api.authed.socket(baseUrl, endpoint, params, {
+          ...options,
+          onOpen(event) {
+            if (stopped || id !== generation) return;
+            failures = 0;
+            state('connected');
+            try { onOpen?.(event); } catch (e) { console.error(e); }
+            if (everOpened) {
+              try { onResume?.(event); } catch (e) { console.error(e); }
+            }
+            everOpened = true;
+          },
+          onMessage(event) { if (!stopped && id === generation) onMessage?.(event); },
+          onError(event) { if (!stopped && id === generation) onError?.(event); },
+          onClose(event) {
+            if (stopped || id !== generation) return;
+            current = null;
+            try { onClose?.(event); } catch (e) { console.error(e); }
+            // A 4001 from an older server calls refreshJwt in socket().
+            // The next connect() awaits an up-to-date credential if needed.
+            schedule(event);
+          },
+        });
+      } catch (error) {
+        if (!stopped && id === generation) schedule(error);
+      }
+    };
+    void connect();
+    return controller;
   }
 };
 

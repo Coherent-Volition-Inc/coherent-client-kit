@@ -144,3 +144,109 @@ test('a newer login is not discarded if bootstrapping the stale token fails', as
   assert.equal(Auth.isAuthenticated, true);
   assert.equal(Auth.user.username, 'user');
 });
+
+class FakeChannel {
+  constructor(readyState = 'connecting') { this.readyState = readyState; this.sent = []; this.events = new Map(); }
+  send(raw) { this.sent.push(JSON.parse(raw)); }
+  addEventListener(type, callback) { const ls = this.events.get(type) || []; ls.push(callback); this.events.set(type, ls); }
+  removeEventListener(type, callback) { this.events.set(type, (this.events.get(type) || []).filter(x => x !== callback)); }
+  emit(type, detail = {}) { for (const callback of this.events.get(type) || []) callback(detail); }
+  close() { this.readyState = 'closed'; this.emit('close'); }
+}
+
+test('RTC control channels renew in place and stop after disposal', () => {
+  Auth.setToken(jwt(future()));
+  const channel = new FakeChannel('connecting');
+  let renewAcks = 0;
+  const stop = Auth.registerChannel(channel, {onRenewed:()=>renewAcks++});
+  channel.readyState = 'open'; channel.emit('open');
+  channel.emit('message', {data:JSON.stringify({type:'auth.renewed'})});
+  assert.equal(renewAcks, 1);
+  assert.equal(channel.sent.length, 1);
+  assert.equal(channel.sent[0].action, 'auth.renew');
+  Auth.setToken(jwt(future()+100));
+  assert.equal(channel.sent.length, 2);
+  stop();
+  Auth.setToken(jwt(future()+200));
+  assert.equal(channel.sent.length, 2);
+  assert.equal(channel.readyState, 'open');
+  channel.close();
+});
+
+test('registerChannel closes RTC channel on explicit logout', () => {
+  Auth.setToken(jwt(future()));
+  const channel = new FakeChannel('open');
+  Auth.registerChannel(channel);
+  Auth.logout();
+  assert.equal(channel.readyState, 'closed');
+  assert.equal(Auth._liveChannels.size, 0);
+});
+
+test('Api.authed.socket auto-renews before the application onOpen callback', async () => {
+  const {default: Api} = await import('../src/api.js');
+  Auth.setToken(jwt(future()));
+  const oldWebSocket = globalThis.WebSocket;
+  let ws;
+  globalThis.WebSocket = class extends FakeChannel {
+    constructor(url) { super(); this.url = url; ws = this; }
+  };
+  try {
+    const seen = [];
+    const created = Api.authed.socket('https://slides.example.test/', 'ws', {}, {
+      onOpen: () => seen.push(...ws.sent.map(x => x.action)),
+    });
+    assert.equal(created, ws);
+    assert.ok(ws.url.includes('jwt='));
+    Auth.setToken(jwt(future()+100)); // changed while handshake in flight
+    ws.readyState = 'open'; ws.emit('open');
+    assert.deepEqual(seen, ['auth.renew']);
+    assert.equal(ws.sent.length, 1);
+    ws.close();
+    Auth.setToken(jwt(future()+200));
+    assert.equal(ws.sent.length, 1);
+  } finally { globalThis.WebSocket = oldWebSocket; }
+});
+
+test('transient refresh failures keep session and retry; explicit logout cancels retry', async () => {
+  Auth.setToken(jwt(future()));
+  globalThis.fetch = async () => { throw new Error('temporary network failure'); };
+  await assert.rejects(Auth.refreshJwt(), /temporary network/);
+  assert.equal(Auth.isAuthenticated, true);
+  assert.ok(Auth._refreshRetryTimer);
+  Auth.logout();
+  assert.equal(Auth._refreshRetryTimer, null);
+  assert.equal(Auth.isAuthenticated, false);
+});
+
+test('liveSocket reconnects after transport loss and calls onResume once', async () => {
+  const {default: Api} = await import('../src/api.js');
+  Auth.setToken(jwt(future()));
+  const previous = globalThis.WebSocket;
+  const sockets = [];
+  globalThis.WebSocket = class extends FakeChannel {
+    static OPEN = 'open';
+    constructor(url) { super(); this.url = url; sockets.push(this); }
+  };
+  try {
+    let opens = 0, resumes = 0;
+    const live = Api.authed.liveSocket('https://slides.example.test/', 'ws', {}, {
+      retryBaseMs: 5, retryMaxMs: 10,
+      onOpen: () => opens++,
+      onResume: () => resumes++,
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(sockets.length, 1);
+    sockets[0].readyState = 'open'; sockets[0].emit('open');
+    assert.equal(opens, 1);
+    assert.equal(live.send(JSON.stringify({type:'hello'})), true);
+    sockets[0].close();
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(sockets.length, 2);
+    sockets[1].readyState = 'open'; sockets[1].emit('open');
+    assert.equal(opens, 2);
+    assert.equal(resumes, 1);
+    live.close();
+    await new Promise(resolve => setTimeout(resolve, 15));
+    assert.equal(sockets.length, 2);
+  } finally { globalThis.WebSocket = previous; }
+});

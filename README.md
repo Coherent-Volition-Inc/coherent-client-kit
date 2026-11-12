@@ -21,6 +21,40 @@ Designed for **browser ESM** (module scripts), especially Mithril.js front-ends.
 
 ---
 
+## Long-lived authenticated connections
+
+Existing `Api.authed.socket(base, '/ws', params, callbacks)` users are automatically
+registered for in-place JWT renewal. **No new call is necessary.** When CVKit
+refreshes a token, it sends `{"action":"auth.renew","jwt":"..."}` over each
+open socket. This requires a server supporting pycronado >= 1.2.0, or a
+compatible protocol. Set `{autoRenew:false}` in the socket options for older
+servers that do not support it.
+
+For a manually created WebRTC **reliable control** data channel (or another
+channel implementing `send`, `readyState`, and DOM event listeners):
+
+```js
+const stopRenewing = Auth.registerChannel(controlDataChannel, {
+  onRenewed: () => game.requestCurrentSnapshot(),
+});
+// Call stopRenewing() when removing the connection, or let the 'close' event do so.
+```
+
+For new applications that want transport-level recovery too, use
+`Api.authed.liveSocket(base, '/ws', params, {onOpen, onMessage, onResume})`.
+It returns a controller with `send(data)`, `close()`, `readyState`, and `socket`.
+`onOpen` runs for every physical connection; rejoin rooms there. `onResume`
+runs on subsequent connections to fetch/reconcile application state. Use
+`Api.authed.socket` instead when your application already manages reconnection.
+
+CVKit renews these registered transports on successful JWT refresh, including
+when a token changes while a socket is still connecting. Temporary refresh
+network failures retry with bounded backoff until expiration + 120 seconds;
+a definitive 401/403 or explicit logout ends authentication. New logical
+connections after a true network or server failure still need application
+rejoin/snapshot recovery; in-place JWT renewal does not make WebRTC or WebSocket
+transports magically resumable after an actual disconnect.
+
 ## Requirements
 
 - A modern browser with ES module support

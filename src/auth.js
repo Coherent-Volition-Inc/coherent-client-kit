@@ -560,7 +560,88 @@ export const Auth = {
   // ------------------------------------------------------------------
 
   _refreshTimer: null,
+  _refreshRetryTimer: null,
+  _refreshRetryCount: 0,
   _refreshWakeupInstalled: false,
+  _liveChannels: new Set(),
+
+  /** Register an already-created WebSocket or RTCDataChannel for JWT renewal.
+   *
+   *   const stop = Auth.registerChannel(peer.createDataChannel('control'));
+   *
+   * Api.authed.socket registers itself; callers of that API need no changes.
+   * The reliable channel must understand {action:'auth.renew', jwt} and expose
+   * send(), readyState, addEventListener('open'/'close'). Returns a disposer.
+   * Transport reconnection and application snapshots remain caller concerns.
+   */
+  registerChannel(channel, { sendOnOpen = true, closeOnLogout = true, onRenewed } = {}) {
+    if (!channel || typeof channel.send !== 'function' ||
+        typeof channel.addEventListener !== 'function') {
+      throw new TypeError('Auth.registerChannel expects a WebSocket/RTCDataChannel');
+    }
+    const entry = {channel, closeOnLogout, initialJwt: this.jwt};
+    const ready = () => channel.readyState === 'open' || channel.readyState === 1;
+    const send = () => {
+      if (!this.isAuthenticated || !this.jwt || !ready()) return;
+      try { channel.send(JSON.stringify({action:'auth.renew', jwt:this.jwt})); }
+      catch { /* Transport may close during notification. */ }
+    };
+    const open = () => { if (sendOnOpen || entry.initialJwt !== this.jwt) send(); };
+    const message = (event) => {
+      if (typeof onRenewed !== 'function') return;
+      let payload;
+      try { payload = JSON.parse(event.data); } catch { return; }
+      if (payload?.type === 'auth.renewed') onRenewed(payload);
+    };
+    const stop = () => {
+      this._liveChannels.delete(entry);
+      channel.removeEventListener?.('open', open);
+      channel.removeEventListener?.('close', stop);
+      channel.removeEventListener?.('message', message);
+    };
+    entry.send = send;
+    entry.stop = stop;
+    channel.addEventListener('open', open);
+    channel.addEventListener('close', stop);
+    channel.addEventListener('message', message);
+    this._liveChannels.add(entry);
+    if (ready() && sendOnOpen) send();
+    return stop;
+  },
+
+  _notifyChannels(previousJwt) {
+    if (previousJwt === this.jwt) return;
+    for (const entry of [...this._liveChannels]) {
+      if (!this.isAuthenticated && entry.closeOnLogout) {
+        entry.stop();
+        try { entry.channel.close(); } catch {}
+      } else if (this.isAuthenticated) entry.send();
+    }
+  },
+
+  _clearRefreshRetry() {
+    if (this._refreshRetryTimer != null) clearTimeout(this._refreshRetryTimer);
+    this._refreshRetryTimer = null;
+    this._refreshRetryCount = 0;
+  },
+
+  _retryTransientRefresh() {
+    if (!this.jwt || !this.isAuthenticated || this._refreshRetryTimer != null) return;
+    let exp = 0;
+    try { exp = Number(decodeJwt(this.jwt).exp) * 1000; } catch {}
+    // Server's default in-place renewal grace is 120 seconds. Do not leave
+    // clients indefinitely believing an expired credential is usable.
+    if (!exp || Date.now() >= exp + 120000) {
+      this.logout({rememberCurrentPath:true});
+      return;
+    }
+    const delay = Math.min(30000, 1000 * 2 ** Math.min(this._refreshRetryCount++, 5));
+    this._refreshRetryTimer = setTimeout(() => {
+      this._refreshRetryTimer = null;
+      if (this.isAuthenticated) this.refreshJwt().catch(() => {});
+    }, delay);
+    this._refreshRetryTimer?.unref?.();
+  },
   _sessionGeneration: 0,
 
   _clearRefreshTimer() {
@@ -608,8 +689,10 @@ export const Auth = {
     try { if (jwt) claims = decodeJwt(jwt); } catch {}
     if (claims?.exp != null && (!Number.isFinite(claims.exp) || claims.exp * 1000 <= Date.now())) claims = null;
 
+    const previousJwt = this.jwt;
     this._sessionGeneration++;
     this._clearRefreshTimer();
+    this._clearRefreshRetry();
     this.jwt = claims ? jwt : null;
     this.isAuthenticated = !!claims && !claims.purpose;
     this.user = claims?.user || null;
@@ -622,6 +705,7 @@ export const Auth = {
     localStorage.removeItem('refreshToken');
 
     if (this.isAuthenticated) this._scheduleRefresh(claims);
+    this._notifyChannels(previousJwt);
   },
 
   // Backward-compatible alias in case old callers still use setTokens.
@@ -679,7 +763,9 @@ export const Auth = {
           try { claims = decodeJwt(response.jwt); } catch {}
           if (!claims || claims.purpose || (claims.exp != null &&
               (!Number.isFinite(claims.exp) || claims.exp * 1000 <= Date.now()))) {
-            throw new Error('Token refresh returned an unusable JWT');
+            const invalid = new Error('Token refresh returned an unusable JWT');
+            invalid.code = 403;
+            throw invalid;
           }
           this.setToken(response.jwt);
           return response;
@@ -690,8 +776,14 @@ export const Auth = {
             'Token refresh failed - no JWT in response'
         );
       } catch (e) {
-        if (logoutOnFailure && generation === this._sessionGeneration) {
-          this.logout({ rememberCurrentPath:true });
+        if (generation === this._sessionGeneration && logoutOnFailure) {
+          // Only definitive credential rejection is an immediate logout.
+          // Network timeouts, 429s, and server errors get bounded retries,
+          // during which pycronado suspends private traffic server-side.
+          const code = Number(e?.code);
+          const terminal = code >= 400 && code < 500 && code !== 408 && code !== 429;
+          if (terminal) this.logout({ rememberCurrentPath:true });
+          else this._retryTransientRefresh();
         }
         throw e;
       } finally {
