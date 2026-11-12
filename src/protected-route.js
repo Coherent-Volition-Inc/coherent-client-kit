@@ -46,7 +46,10 @@ export function ProtectedRouteFactory(LoginComponent, DeniedComponent = DefaultD
     },
 
     view(vnode) {
-      if (!vnode.state._authReady) return null;
+      if (!vnode.state._authReady) {
+        return m('.min-h-screen.flex.items-center.justify-center.text-gray-500',
+          'Restoring session…');
+      }
 
       if (!Auth.isAuthenticated) return m(LoginComponent);
 

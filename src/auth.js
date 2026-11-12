@@ -116,30 +116,35 @@ function routePatternMatches(pattern, actualPath) {
 }
 
 async function _postJson(url, body, { credentials } = {}) {
-  const res = await fetch(url, {
-    method: 'POST',
-    credentials: credentials || 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : null,
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      credentials: credentials || 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : null,
+      signal: controller.signal,
+    });
+    const ct = res.headers.get('content-type') || '';
+    const payload = ct.includes('application/json')
+      ? await res.json().catch(() => null)
+      : await res.text().catch(() => null);
 
-  const ct = res.headers.get('content-type') || '';
-  const payload = ct.includes('application/json')
-    ? await res.json().catch(() => null)
-    : await res.text().catch(() => null);
+    if (!res.ok) {
+      const msg = (payload && payload.message)
+        ? payload.message
+        : `HTTP ${res.status}`;
 
-  if (!res.ok) {
-    const msg = (payload && payload.message)
-      ? payload.message
-      : `HTTP ${res.status}`;
-
-    const err = new Error(msg);
-    err.code = res.status;
-    err.response = payload;
-    throw err;
+      const err = new Error(msg);
+      err.code = res.status;
+      err.response = payload;
+      throw err;
+    }
+    return payload;
+  } finally {
+    clearTimeout(timeout);
   }
-
-  return payload;
 }
 
 export const Auth = {
@@ -554,34 +559,69 @@ export const Auth = {
   // state and authorization headers.
   // ------------------------------------------------------------------
 
-  setToken(jwt) {
-    this.jwt = jwt || null;
-    this.isAuthenticated = !!jwt && !decodeJwt(jwt).purpose;
+  _refreshTimer: null,
+  _refreshWakeupInstalled: false,
+  _sessionGeneration: 0,
 
-    if (jwt) {
-      const restricted = decodeJwt(jwt).purpose;
-      if (restricted) localStorage.removeItem('jwt');
-      else localStorage.setItem('jwt', jwt);
+  _clearRefreshTimer() {
+    if (this._refreshTimer != null) clearTimeout(this._refreshTimer);
+    this._refreshTimer = null;
+  },
 
-      const payload = decodeJwt(jwt);
-
-      this.user = payload.user || null;
-      this.iss = payload.iss || null;
-      this.permissions = !payload.purpose && Array.isArray(
-        payload.user?.permissions
-      )
-        ? payload.user.permissions
-        : [];
-    } else {
-      localStorage.removeItem('jwt');
-
-      this.user = null;
-      this.iss = null;
-      this.permissions = [];
+  _refreshIfExpiring() {
+    if (!this.isAuthenticated || !this.jwt) return;
+    let claims;
+    try { claims = decodeJwt(this.jwt); } catch { this.logout({ rememberCurrentPath:true }); return; }
+    if (Number.isFinite(claims.exp) && claims.exp * 1000 - Date.now() <= 60000) {
+      // Errors are handled by refreshJwt (including the logged-out redraw).
+      this.refreshJwt().catch(() => {});
     }
+  },
 
-    // Clean up old pre-cookie storage if present.
+  _scheduleRefresh(claims) {
+    this._clearRefreshTimer();
+    if (!this.isAuthenticated || !Number.isFinite(claims?.exp)) return;
+
+    const remaining = claims.exp * 1000 - Date.now();
+    // Refresh a minute early for normal JWTs. For very short-lived JWTs,
+    // wait until halfway through their lifetime to avoid immediate loops.
+    const delay = remaining > 120000 ? remaining - 60000 : Math.max(1000, remaining / 2);
+    this._refreshTimer = setTimeout(() => {
+      this._refreshTimer = null;
+      if (this.isAuthenticated) this.refreshJwt().catch(() => {});
+    }, Math.min(delay, 2147483647));
+    this._refreshTimer?.unref?.(); // Don't keep Node test processes alive.
+
+    if (!this._refreshWakeupInstalled) {
+      this._refreshWakeupInstalled = true;
+      globalThis.document?.addEventListener?.('visibilitychange', () => {
+        if (!globalThis.document.hidden) this._refreshIfExpiring();
+      });
+      window?.addEventListener?.('focus', () => this._refreshIfExpiring());
+    }
+  },
+
+  setToken(jwt) {
+    // A stale/corrupted localStorage JWT must never prevent the SPA from
+    // mounting (nor be treated as a logged-in session).
+    let claims = null;
+    try { if (jwt) claims = decodeJwt(jwt); } catch {}
+    if (claims?.exp != null && (!Number.isFinite(claims.exp) || claims.exp * 1000 <= Date.now())) claims = null;
+
+    this._sessionGeneration++;
+    this._clearRefreshTimer();
+    this.jwt = claims ? jwt : null;
+    this.isAuthenticated = !!claims && !claims.purpose;
+    this.user = claims?.user || null;
+    this.iss = claims?.iss || null;
+    this.permissions = this.isAuthenticated && Array.isArray(claims?.user?.permissions)
+      ? claims.user.permissions : [];
+
+    if (this.isAuthenticated) localStorage.setItem('jwt', jwt);
+    else localStorage.removeItem('jwt');
     localStorage.removeItem('refreshToken');
+
+    if (this.isAuthenticated) this._scheduleRefresh(claims);
   },
 
   // Backward-compatible alias in case old callers still use setTokens.
@@ -591,27 +631,12 @@ export const Auth = {
 
   logout({ rememberCurrentPath = false } = {}) {
     if (rememberCurrentPath) {
-      const remembered =
-        this.rememberCurrentPath();
-
-      if (!remembered) {
-        this.clearInterruptedPath();
-      }
+      if (!this.rememberCurrentPath()) this.clearInterruptedPath();
     } else {
-      // Explicit logout should not send the user back into the previous
-      // protected screen after their next login.
       this.clearInterruptedPath();
     }
 
-    this.jwt = null;
-    this.isAuthenticated = false;
-    this.user = null;
-    this.iss = null;
-    this.permissions = [];
-
-    localStorage.removeItem('jwt');
-    localStorage.removeItem('refreshToken');
-
+    this.setToken(null);
     m.redraw();
   },
 
@@ -621,15 +646,41 @@ export const Auth = {
     if (this.jwt && decodeJwt(this.jwt).purpose) throw new Error('Password-reset credentials cannot refresh');
     if (this._refreshPromise) return this._refreshPromise;
 
+    const generation = this._sessionGeneration;
     this._refreshPromise = (async () => {
       try {
         const authApi = this._requireAuthApi();
 
         const refresh = () => _postJson(`${authApi}/api/token`, null, { credentials: 'include' });
         const locks = globalThis.navigator?.locks;
-        const response = locks ? await locks.request(`cvkit:refresh:${authApi}`, refresh) : await refresh();
+        let response;
+        if (locks?.request) {
+          // A suspended tab can hold the cross-tab refresh lock. Never let
+          // that stall a protected route's initialization indefinitely.
+          const lockController = new AbortController();
+          const lockTimeout = setTimeout(() => lockController.abort(), 12000);
+          try {
+            response = await locks.request(`cvkit:refresh:${authApi}`,
+              { signal: lockController.signal }, refresh);
+          } finally {
+            clearTimeout(lockTimeout);
+          }
+        } else {
+          response = await refresh();
+        }
 
+        // An explicit logout or a different login while the request was in
+        // flight must not resurrect the previous session.
+        if (generation !== this._sessionGeneration) {
+          throw new Error('Authentication changed during token refresh');
+        }
         if (response?.jwt) {
+          let claims;
+          try { claims = decodeJwt(response.jwt); } catch {}
+          if (!claims || claims.purpose || (claims.exp != null &&
+              (!Number.isFinite(claims.exp) || claims.exp * 1000 <= Date.now()))) {
+            throw new Error('Token refresh returned an unusable JWT');
+          }
           this.setToken(response.jwt);
           return response;
         }
@@ -639,7 +690,7 @@ export const Auth = {
             'Token refresh failed - no JWT in response'
         );
       } catch (e) {
-        if (logoutOnFailure) {
+        if (logoutOnFailure && generation === this._sessionGeneration) {
           this.logout({ rememberCurrentPath:true });
         }
         throw e;
@@ -838,22 +889,29 @@ export const Auth = {
   init() {
     this._requireAuthApi();
     this._requireHomePath();
+    // Repeated calls must not replace the promise that a mounted route is
+    // waiting for (or overwrite tokens installed by an OAuth return).
+    if (this._initPromise) return this._initPromise;
 
-    const storedJwt =
-      localStorage.getItem('jwt');
-
+    const storedJwt = localStorage.getItem('jwt');
     this.setToken(storedJwt || null);
-
-    // Store the promise so route guards and landing routes can await it
-    // before making any auth decisions. Always resolves and never rejects.
     this._initDone = false;
 
-    this._initPromise =
-      this._handleOAuthReturnIfPresent()
-        .catch(() => {})
-        .then(() => {
-          this._initDone = true;
-        });
+    this._initPromise = (async () => {
+      let handledOAuth = false;
+      try { handledOAuth = await this._handleOAuthReturnIfPresent(); } catch {}
+
+      // Expired/corrupt stored access tokens are not logged-in sessions.
+      // The refresh cookie may still be valid: try it before letting route
+      // guards render the login screen. Do not silently log in visitors
+      // with no stored JWT (e.g. after an explicit logout).
+      if (!handledOAuth && storedJwt && !this.isAuthenticated) {
+        const generation = this._sessionGeneration;
+        try { await this.refreshJwt({ logoutOnFailure:false }); }
+        catch { if (generation === this._sessionGeneration) this.setToken(null); }
+      }
+      this._initDone = true;
+    })();
 
     return this._initPromise;
   },
